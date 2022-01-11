@@ -38,6 +38,9 @@ try {
     case 'pull_request_event_move_card':
       pullRequestEventMoveCard();
       break;
+    case 'pr_opened_create_card':
+      prOpenedCreateCard();
+      break;
 
     default:
       throw Error('Action is not supported: ' + action);
@@ -46,6 +49,100 @@ try {
   core.setFailed(error as Error);
 }
 
+function prOpenedCreateCard() {
+  const issue = ghPayload.pull_request;
+  const issueNumber = issue?.number;
+  const issueTitle = issue?.title;
+  const issueBody = issue?.body;
+  const issueUrl = issue?.html_url;
+  const issueAssigneeNicks = issue?.assignees.map((assignee: any) => assignee.login);
+  const issueLabelNames = issue?.labels.map((label: any) => label.name);
+  const listId: string = process.env.TRELLO_LIST_ID as string;
+  const trelloLabelIds: string[] = [];
+  const memberIds: string[] = [];
+  if (verbose) {
+    console.log(JSON.stringify(repository, undefined, 2));
+  }
+
+  if (!validateListExistsOnBoard(listId)) {
+    core.setFailed('TRELLO_LIST_ID is not valid.');
+    return;
+  }
+
+  const getLabels = getLabelsOfBoard().then((trelloLabels) => {
+    if (typeof trelloLabels === 'string') {
+      core.setFailed(trelloLabels);
+      return;
+    }
+    const intersection = trelloLabels.filter((label) => issueLabelNames.includes(label.name));
+    const matchingLabelIds = intersection.map((trelloLabel) => trelloLabel.id);
+    trelloLabelIds.push(...matchingLabelIds);
+  });
+
+  const getMembers = getMembersOfBoard().then((trelloMembers) => {
+    if (typeof trelloMembers === 'string') {
+      core.setFailed(trelloMembers);
+      return;
+    }
+    const membersOnBothSides = trelloMembers.filter((member) =>
+      issueAssigneeNicks.includes(member.username),
+    );
+    const matchingMemberIds = membersOnBothSides.map((trelloMember) => trelloMember.id);
+    memberIds.push(...matchingMemberIds);
+  });
+
+  Promise.all([getLabels, getMembers]).then(() => {
+    const params = {
+      number: issueNumber,
+      title: issueTitle,
+      description: issueBody,
+      sourceUrl: issueUrl,
+      memberIds: memberIds.join(),
+      labelIds: trelloLabelIds.join(),
+    } as unknown as TrelloCardRequestParams;
+
+    if (verbose) {
+      console.log(`Creating new card to ${listId} from issue  "[#${issueNumber}] ${issueTitle}"`);
+    }
+    // No need to create the attachment for this repository separately since the createCard()
+    // adds the backlink to the created issue, see
+    // params.sourceUrl property.
+    createCard(listId, params).then((createdCard) => {
+      if (typeof createdCard === 'string') {
+        core.setFailed(createdCard);
+        return;
+      }
+
+      if (verbose) {
+        console.log(
+          `Card created: "[#${issueNumber}] ${issueTitle}], url ${createdCard.shortUrl}"`,
+        );
+      }
+
+      const markdownLink: string = `Trello card: [${createdCard.name}](${createdCard.shortUrl})`;
+      const commentData = {
+        comment: markdownLink,
+        issueNumber: issueNumber,
+        repoOwner: repository.owner,
+        repoName: repository.repo,
+      };
+
+      addIssueComment(commentData)
+        .then((success) => {
+          if (success) {
+            if (verbose) {
+              console.log(`Link to the Trello Card added to the issue: ${createdCard.shortUrl}`);
+            }
+          } else {
+            console.error(`Non-fatal error: Failed to add link to the Trello card.`);
+          }
+        })
+        .catch(() => {
+          console.error(`Non-fatal error: Failed to add link to the Trello card.`);
+        });
+    });
+  });
+}
 function issueOpenedCreateCard() {
   const issue = ghPayload.issue;
   const issueNumber = issue?.number;
